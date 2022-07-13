@@ -12,7 +12,7 @@ import trimesh
 import torch
 from torch.utils.data import DataLoader
 
-from .utils import get_rays, srgb_to_linear, torch_vis_2d
+from .utils import get_rays, get_patchrays, srgb_to_linear, torch_vis_2d
 
 
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
@@ -89,6 +89,28 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
     poses[:, :3, 3] = centers
 
     return poses
+
+
+def extract_patches_from_images(images, inds, patch_size):
+    #  input  images [B, H, W, 3/4]
+    #  output  images [B, N, PS, PS, 3/4]
+    B = images.shape[0]
+    H = images.shape[1]
+    W = images.shape[2]
+    C = images.shape[3]
+    N = inds.shape[1]
+    img_result = torch.zeros((B, N, patch_size*2+1, patch_size*2+1, C))
+    #
+    for c_i in range(patch_size * 2 + 1):
+        for c_j in range(patch_size * 2 + 1):
+            off_i = c_i - patch_size
+            off_j = c_j - patch_size
+            # shift and crop images in order to make inds correct (as they correspond to a crop)
+            shifted_images = images[:, patch_size+off_j:H-patch_size+off_j, patch_size+off_i:W-patch_size+off_i, :]
+            #  must reshape
+            shifted_images = torch.gather(shifted_images.reshape(B, -1, C), 1, torch.stack(C * [inds], -1))  # [B, N, 3/4]
+            img_result[:, :, c_j, c_i, :] = shifted_images
+    return img_result
 
 
 class NeRFDataset:
@@ -187,7 +209,7 @@ class NeRFDataset:
                 if type == 'train':
                     frames = frames[1:]
                 elif type == 'val':
-                    frames = frames[:1]
+                    frames = frames[:2]
                 # else 'all' or 'trainval' : use all frames
             
             self.poses = []
@@ -292,7 +314,7 @@ class NeRFDataset:
                 'H': rH,
                 'W': rW,
                 'rays_o': rays['rays_o'],
-                'rays_d': rays['rays_d'],    
+                'rays_d': rays['rays_d'],
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
@@ -300,7 +322,7 @@ class NeRFDataset:
         error_map = None if self.error_map is None else self.error_map[index]
         
         rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
-        
+
         results = {
             'H': self.H,
             'W': self.W,
@@ -310,11 +332,17 @@ class NeRFDataset:
 
         if self.images is not None:
             images = self.images[index].to(self.device) # [B, H, W, 3/4]
+            rays_on_patch = get_patchrays(poses, self.intrinsics, self.H, self.W, self.num_rays)
+            images_on_patch = extract_patches_from_images(images, rays_on_patch['inds'], rays_on_patch['patch_size'])
             if self.training:
                 C = images.shape[-1]
                 images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
             results['images'] = images
-        
+
+
+
+
+
         # need inds to update error_map
         if error_map is not None:
             results['index'] = index

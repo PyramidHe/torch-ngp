@@ -72,10 +72,10 @@ def get_patchrays(poses, intrinsics, H, W, N, PS=3):
     N = min(N, Hp*Wp)
     inds = torch.randint(0, Hp*Wp, size=[N], device=device)  # may duplicate
     inds = inds.expand([B, N])
-    rays_patch_o = torch.zeros((B, N, PS * 2 + 1, PS*2+1, 3))
-    rays_patch_d = torch.zeros((B, N, PS * 2 + 1, PS*2+1, 3))
-    for c_j in range(PS * 2 + 1):
-        for c_i in range(PS * 2 + 1):
+    rays_patch_o = torch.zeros((B, N, PS*2+1, PS*2+1, 3))
+    rays_patch_d = torch.zeros((B, N, PS*2+1, PS*2+1, 3))
+    for c_i in range(PS * 2 + 1):
+        for c_j in range(PS * 2 + 1):
             off_i = c_i - PS
             off_j = c_j - PS
             ig = torch.gather(i + off_i, -1, inds)
@@ -88,12 +88,13 @@ def get_patchrays(poses, intrinsics, H, W, N, PS=3):
             rays_d = directions @ poses[:, :3, :3].transpose(-1, -2)  # (B, N, 3)
             rays_o = poses[..., :3, 3]  # [B, 3]
             rays_o = rays_o[..., None, :].expand_as(rays_d)  # [B, N, 3]
-            rays_patch_d[:, :, c_i, c_j, :] = rays_d
-            rays_patch_o[:, :, c_i, c_j, :] = rays_o
+            rays_patch_d[:, :, c_j, c_i, :] = rays_d
+            rays_patch_o[:, :, c_j, c_i, :] = rays_o
 
     results['rays_patch_o'] = rays_patch_o
     results['rays_patch_d'] = rays_patch_d
-
+    results['inds'] = inds
+    results['patch_size'] = PS
     return results
 
 
