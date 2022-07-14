@@ -4,6 +4,18 @@ import torch.nn.functional as F
 
 import numpy as np
 
+
+def smooth_depth_loss(depths, images):
+    full_patch_size = depths.shape[-1]
+    c_index = (full_patch_size - 1)//2
+    images = images - images[..., c_index, c_index, :].unsqueeze(-2).unsqueeze(-2)
+    depths = depths - depths[..., c_index, c_index, :].unsqueeze(-2).unsqueeze(-2)
+    images = torch.norm(images, dim=-1)
+    depths = torch.abs(depths)
+    mask = images < 0.1
+    loss = torch.mean(depths[mask])
+    return loss
+
 def mape_loss(pred, target, reduction='mean'):
     # pred, target: [B, 1], torch tenspr
     difference = (pred - target).abs()

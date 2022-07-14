@@ -331,12 +331,16 @@ class NeRFDataset:
         }
 
         if self.images is not None:
-            images = self.images[index].to(self.device) # [B, H, W, 3/4]
-            rays_on_patch = get_patchrays(poses, self.intrinsics, self.H, self.W, self.num_rays)
-            images_on_patch = extract_patches_from_images(images, rays_on_patch['inds'], rays_on_patch['patch_size'])
+            imgs= self.images[index].to(self.device) # [B, H, W, 3/4]
             if self.training:
-                C = images.shape[-1]
-                images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
+                C = imgs.shape[-1]
+                images = torch.gather(imgs.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
+                # patches
+                rays_on_patch = get_patchrays(poses, self.intrinsics, self.H, self.W, self.num_rays//100)
+                images_on_patch = extract_patches_from_images(imgs, rays_on_patch['inds'], rays_on_patch['patch_size'])
+                results['images_patch'] = images_on_patch
+                results['rays_patch_o'] = rays_on_patch['rays_patch_o']
+                results['rays_patch_d'] = rays_on_patch['rays_patch_d']
             results['images'] = images
 
 

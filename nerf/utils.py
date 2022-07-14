@@ -28,6 +28,7 @@ from rich.console import Console
 from torch_ema import ExponentialMovingAverage
 
 from packaging import version as pver
+from loss import smooth_depth_loss
 
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
@@ -72,8 +73,8 @@ def get_patchrays(poses, intrinsics, H, W, N, PS=3):
     N = min(N, Hp*Wp)
     inds = torch.randint(0, Hp*Wp, size=[N], device=device)  # may duplicate
     inds = inds.expand([B, N])
-    rays_patch_o = torch.zeros((B, N, PS*2+1, PS*2+1, 3))
-    rays_patch_d = torch.zeros((B, N, PS*2+1, PS*2+1, 3))
+    rays_patch_o = torch.zeros((B, N, PS*2+1, PS*2+1, 3), device=device)
+    rays_patch_d = torch.zeros((B, N, PS*2+1, PS*2+1, 3), device=device)
     for c_i in range(PS * 2 + 1):
         for c_j in range(PS * 2 + 1):
             off_i = c_i - PS
@@ -413,8 +414,7 @@ class Trainer(object):
                 print(*args, file=self.log_ptr)
                 self.log_ptr.flush() # write immediately to file
 
-    ### ------------------------------	
-
+    ### ------------------------------
     def train_step(self, data):
 
         rays_o = data['rays_o'] # [B, N, 3]
@@ -458,7 +458,15 @@ class Trainer(object):
             gt_rgb = images
 
         outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=False, **vars(self.opt))
-    
+
+        # patch
+        rays_patch_o = data['rays_patch_o']
+        rays_patch_d = data['rays_patch_d']
+        full_patch_size = rays_patch_o.shape[-2]
+        outputs_patch = self.model.render(rays_patch_o.view(B, -1, 3), rays_patch_d.view(B, -1, 3), staged=False, bg_color=bg_color, perturb=True, force_all_rays=False, **vars(self.opt))
+        depths_patch = outputs_patch['depth'].view(B, -1, full_patch_size, full_patch_size)
+        images_patch = data['images_patch']
+        smooth_l = smooth_depth_loss(depths_patch, images_patch)
         pred_rgb = outputs['image']
 
         loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]
@@ -490,8 +498,7 @@ class Trainer(object):
 
             # put back
             self.error_map[index] = error_map
-
-        loss = loss.mean()
+        loss = loss.mean() + 0.1*smooth_l
 
         return pred_rgb, gt_rgb, loss
 
