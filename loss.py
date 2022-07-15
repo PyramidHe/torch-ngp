@@ -9,7 +9,7 @@ def smooth_depth_loss(depths, images):
     full_patch_size = depths.shape[-1]
     c_index = (full_patch_size - 1)//2
     images = images - images[..., c_index, c_index, :].unsqueeze(-2).unsqueeze(-2)
-    depths = depths - depths[..., c_index, c_index, :].unsqueeze(-2).unsqueeze(-2)
+    depths = depths - depths[..., c_index, c_index].unsqueeze(-1).unsqueeze(-1)
     images = torch.norm(images, dim=-1)
     depths = torch.abs(depths)
     mask = images < 0.1
