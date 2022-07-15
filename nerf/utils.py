@@ -463,13 +463,20 @@ class Trainer(object):
         rays_patch_o = data['rays_patch_o']
         rays_patch_d = data['rays_patch_d']
         full_patch_size = rays_patch_o.shape[-2]
-        outputs_patch = self.model.render(rays_patch_o.view(B, -1, 3), rays_patch_d.view(B, -1, 3), staged=False, bg_color=bg_color, perturb=True, force_all_rays=False, **vars(self.opt))
-        depths_patch = outputs_patch['depth'].view(B, -1, full_patch_size, full_patch_size)
+        depths_patch = torch.zeros((rays_patch_o.shape[0], rays_patch_o.shape[1], full_patch_size, full_patch_size), device=self.device)
         images_patch = data['images_patch']
-        smooth_l = smooth_depth_loss(depths_patch, images_patch)
         pred_rgb = outputs['image']
+        loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean() # [B, N, 3] --> [B, N]
+        for y in range(full_patch_size):
+            for x in range(full_patch_size):
+                outputs_patch = self.model.render(rays_patch_o[:, :, y, x, :], rays_patch_d[:, :, y, x, :],
+                                  staged=False, bg_color=bg_color, perturb=True, force_all_rays=False,
+                                  **vars(self.opt))
+                depths_patch[:, :, y, x] = outputs_patch['depth']
+                loss += self.criterion(outputs_patch['image'], images_patch[:, :, y, x, :]).mean(-1).mean()
+        smooth_l = smooth_depth_loss(depths_patch, images_patch)
 
-        loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]
+        #loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]
 
         # special case for CCNeRF's rank-residual training
         if len(loss.shape) == 3: # [K, B, N]
@@ -498,7 +505,7 @@ class Trainer(object):
 
             # put back
             self.error_map[index] = error_map
-        loss = loss.mean() + 0.1*smooth_l
+        loss = loss.mean()/(full_patch_size*full_patch_size) + 0.1*smooth_l
 
         return pred_rgb, gt_rgb, loss
 
