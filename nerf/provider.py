@@ -332,6 +332,7 @@ class NeRFDataset:
 
         if self.images is not None:
             imgs = self.images[index].to(self.device) # [B, H, W, 3/4]
+            images = imgs
             if self.training:
                 C = imgs.shape[-1]
                 images = torch.gather(imgs.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
@@ -342,7 +343,7 @@ class NeRFDataset:
                 results['images_patch'] = images_on_patch.to(self.device)
                 results['rays_patch_o'] = rays_on_patch['rays_patch_o']
                 results['rays_patch_d'] = rays_on_patch['rays_patch_d']
-            results['images'] = imgs
+            results['images'] = images
 
 
 
