@@ -49,7 +49,7 @@ def srgb_to_linear(x):
 
 
 @torch.cuda.amp.autocast(enabled=False)
-def get_patchrays(poses, intrinsics, H, W, N, PS=3):
+def get_patchrays(poses, intrinsics, H, W, N, PS=4):
     ''' get rays collected in patches
     Args:
         poses: [B, 4, 4], cam2world
@@ -462,19 +462,33 @@ class Trainer(object):
         # patch
         rays_patch_o = data['rays_patch_o']
         rays_patch_d = data['rays_patch_d']
+        outputs_patch = self.model.run_patch(rays_patch_o, rays_patch_d)
         full_patch_size = rays_patch_o.shape[-2]
-        depths_patch = torch.zeros((rays_patch_o.shape[0], rays_patch_o.shape[1], full_patch_size, full_patch_size), device=self.device)
         images_patch = data['images_patch']
         pred_rgb = outputs['image']
-        loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean() # [B, N, 3] --> [B, N]
-        for y in range(full_patch_size):
-            for x in range(full_patch_size):
-                outputs_patch = self.model.render(rays_patch_o[:, :, y, x, :], rays_patch_d[:, :, y, x, :],
-                                  staged=False, bg_color=bg_color, perturb=True, force_all_rays=False,
-                                  **vars(self.opt))
-                depths_patch[:, :, y, x] = outputs_patch['depth']
-                loss += self.criterion(outputs_patch['image'], images_patch[:, :, y, x, :]).mean(-1).mean()
-        smooth_l = smooth_depth_loss(depths_patch, images_patch)
+        pred_rgb_patch = outputs_patch['image']
+        gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
+        loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
+        #loss = loss + self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
+
+          # [B, N, 3] --> [B, N]
+        if True:
+            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:50]
+            rays_patch_o = torch.index_select(rays_patch_o, dim=1, index=index)
+            rays_patch_d = torch.index_select(rays_patch_d, dim=1, index=index)
+            images_patch = torch.index_select(images_patch, dim=1, index=index)
+            depths_patch = torch.zeros((rays_patch_o.shape[0], rays_patch_o.shape[1], full_patch_size, full_patch_size),
+                                       device=self.device)
+
+            for y in range(full_patch_size):
+                for x in range(full_patch_size):
+                    outputs_patch = self.model.render(rays_patch_o[:, :, y, x, :], rays_patch_d[:, :, y, x, :],
+                                      staged=False, bg_color=bg_color, perturb=True, force_all_rays=False,
+                                      **vars(self.opt))
+                    depths_patch[:, :, y, x] = outputs_patch['depth']
+                    #loss += self.criterion(outputs_patch['image'], images_patch[:, :, y, x, :]).mean(-1).mean()
+            loss = loss + smooth_depth_loss(depths_patch, images_patch)
+
 
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]
 
@@ -505,7 +519,7 @@ class Trainer(object):
 
             # put back
             self.error_map[index] = error_map
-        loss = loss.mean()/(full_patch_size*full_patch_size) + 0.1*smooth_l
+        loss = loss.mean()#/(full_patch_size*full_patch_size) + 2*smooth_l
 
         return pred_rgb, gt_rgb, loss
 
