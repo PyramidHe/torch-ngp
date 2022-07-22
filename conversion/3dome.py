@@ -23,7 +23,7 @@ def change_images_name(folder_in, folder_out, downscale=1.0, in_format='png', ou
         cv2.imwrite(img_name, img)
 
 
-def scanner_to_tranforms(yaml_file, json_file):
+def scanner_to_tranforms(yaml_file, json_file, downscale=1.0):
     in_matrices = []
     ex_matrices = []
     resolutions = []
@@ -41,8 +41,8 @@ def scanner_to_tranforms(yaml_file, json_file):
         if i == 0:
             width = camera_params["intrinsics"][i]["img_width"]
             height = camera_params["intrinsics"][i]["img_height"]
-            fx = camera_params["intrinsics"][i]["fx"]
-            fy = camera_params["intrinsics"][i]["fy"]
+            fx = camera_params["intrinsics"][i]["fx"]/downscale
+            fy = camera_params["intrinsics"][i]["fy"]/downscale
             dict["camera_angle_x"] = 2*np.arctan(0.5*width/fx)
             dict["camera_angle_y"] = 2*np.arctan(0.5*height/fy)
             dict["fl_x"] = fx
@@ -53,8 +53,8 @@ def scanner_to_tranforms(yaml_file, json_file):
             dict["p2"] = camera_params["intrinsics"][i]["dist_py"]
 
             
-            dict["cx"] = camera_params["intrinsics"][i]["cx"]
-            dict["cy"] = camera_params["intrinsics"][i]["cy"]
+            dict["cx"] = camera_params["intrinsics"][i]["cx"]/downscale
+            dict["cy"] = camera_params["intrinsics"][i]["cy"]/downscale
             dict["w"] = width
             dict["h"] = height
             dict["aabb_scale"] = 1
@@ -91,6 +91,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--in_config', type=str)
 parser.add_argument('--out_folder', type=str)
 parser.add_argument('--img_folder', type=str)
+parser.add_argument('--downscale', default=1.0, type=float)
 opt = parser.parse_args()
 
 if __name__ == '__main__':
@@ -99,4 +100,4 @@ if __name__ == '__main__':
         os.makedirs(opt.out_folder)
         print("The new directory is created!")
     in_matrices, ex_matrices, _ = scanner_to_tranforms(opt.in_config, os.path.join(opt.out_folder, "transforms.json"))
-    change_images_name(opt.img_folder, opt.out_folder, downscale=1.0)
+    change_images_name(opt.img_folder, opt.out_folder, downscale=opt.downscale)
