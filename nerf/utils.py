@@ -21,7 +21,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
-
+import torchvision.transforms as T
 import trimesh
 import mcubes
 from rich.console import Console
@@ -230,6 +230,23 @@ def extract_geometry(bound_min, bound_max, resolution, threshold, query_func):
 
     vertices = vertices / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
     return vertices, triangles
+
+
+class ImgFE:
+    def __init__(self, device):
+        self.device = device
+        model = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_efficientnet_widese_b0', pretrained=True)
+        self.utils = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_convnets_processing_utils')
+        # second last layer to extract features
+        self.efficientnet = nn.Sequential(*list(model.children())[:-1])
+        self.efficientnet.eval().to(self.device)
+
+    def extract(self, images):
+        with torch.no_grad():
+            images = images.permute(0, 3, 1, 2).to(self.device)
+            images = T.Resize((224, 224))(images)
+            output = torch.nn.functional.softmax(self.efficientnet(images), dim=1)
+        return output
 
 
 class PSNRMeter:
@@ -457,19 +474,18 @@ class Trainer(object):
         else:
             gt_rgb = images
 
-        outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=False, **vars(self.opt))
-
+        #outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=False, **vars(self.opt))
+        #pred_rgb = outputs['image']
         # patch
         rays_patch_o = data['rays_patch_o']
         rays_patch_d = data['rays_patch_d']
         outputs_patch = self.model.run_patch(rays_patch_o, rays_patch_d)
         full_patch_size = rays_patch_o.shape[-2]
         images_patch = data['images_patch']
-        pred_rgb = outputs['image']
         pred_rgb_patch = outputs_patch['image']
         gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
         loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
-        #loss = loss + self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
+        #loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
 
           # [B, N, 3] --> [B, N]
         if True:
@@ -520,7 +536,7 @@ class Trainer(object):
             # put back
             self.error_map[index] = error_map
         loss = loss.mean()#/(full_patch_size*full_patch_size) + 2*smooth_l
-
+        pred_rgb=None
         return pred_rgb, gt_rgb, loss
 
     def eval_step(self, data):

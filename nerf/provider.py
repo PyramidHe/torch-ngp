@@ -11,8 +11,7 @@ import trimesh
 
 import torch
 from torch.utils.data import DataLoader
-
-from .utils import get_rays, get_patchrays, srgb_to_linear, torch_vis_2d
+from .utils import get_rays, get_patchrays, ImgFE, srgb_to_linear, torch_vis_2d
 
 
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
@@ -116,7 +115,7 @@ def extract_patches_from_images(images, inds, patch_size):
 class NeRFDataset:
     def __init__(self, opt, device, type='train', downscale=1, n_test=10):
         super().__init__()
-        
+        self.feature_extractor = ImgFE(device=device)
         self.opt = opt
         self.device = device
         self.type = type # train, val, test
@@ -196,6 +195,8 @@ class NeRFDataset:
 
             self.poses = []
             self.images = None
+            self.features = None
+
             for i in range(n_test + 1):
                 ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
                 pose = np.eye(4, dtype=np.float32)
@@ -244,10 +245,11 @@ class NeRFDataset:
 
                 self.poses.append(pose)
                 self.images.append(image)
-            
+
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
+            self.features = self.feature_extractor.extract(self.images) # [N, C, H, W]
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
