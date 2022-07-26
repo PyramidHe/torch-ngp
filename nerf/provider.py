@@ -124,9 +124,9 @@ class NeRFDataset:
         self.preload = opt.preload # preload data into GPU
         self.scale = opt.scale # camera radius scale to make sure camera are inside the bounding box.
         self.offset = opt.offset # camera offset
+        self.img_resolution_ff = (opt.img_resolution_ff[0], opt.img_resolution_ff[1])  # input resolution for feature extractor
         self.bound = opt.bound # bounding box half length, also used as the radius to random sample poses.
         self.fp16 = opt.fp16 # if preload, load into fp16.
-
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = self.opt.num_rays if self.training else -1
 
@@ -215,6 +215,7 @@ class NeRFDataset:
             
             self.poses = []
             self.images = []
+
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
                 if self.mode == 'blender' and '.' not in os.path.basename(f_path):
@@ -246,10 +247,11 @@ class NeRFDataset:
                 self.poses.append(pose)
                 self.images.append(image)
 
+
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
-            self.features = self.feature_extractor.extract(self.images) # [N, C, H, W]
+            self.features = self.feature_extractor.extract(self.images, self.img_resolution_ff) # [N, C, H, W]
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
@@ -339,12 +341,14 @@ class NeRFDataset:
                 C = imgs.shape[-1]
                 images = torch.gather(imgs.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
                 # patches
-                rays_on_patch = get_patchrays(poses, self.intrinsics, self.H, self.W, self.num_rays
-                                              )
+                rays_on_patch = get_patchrays(poses, self.intrinsics, self.H, self.W, self.num_rays)
                 images_on_patch = extract_patches_from_images(imgs, rays_on_patch['inds'], rays_on_patch['patch_size'])
                 results['images_patch'] = images_on_patch.to(self.device)
                 results['rays_patch_o'] = rays_on_patch['rays_patch_o']
                 results['rays_patch_d'] = rays_on_patch['rays_patch_d']
+
+                feature = self.features[index].to(self.device)
+
             results['images'] = images
 
 

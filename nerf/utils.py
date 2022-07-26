@@ -98,6 +98,52 @@ def get_patchrays(poses, intrinsics, H, W, N, PS=4):
     results['patch_size'] = PS
     return results
 
+@torch.cuda.amp.autocast(enabled=False)
+def get_patchray_at(poses, intrinsics, H, W, y, x, PS):
+    ''' get rays collected in patches
+    Args:
+        poses: [B, 4, 4], cam2world
+        intrinsics: [4]
+        H, W, PS: int
+        y, x: [B], center coordinates
+    Returns:
+        rays_o, rays_d: [B, N, PS*2+1, PS*2+1, 3]
+        inds: [B, N]
+    '''
+
+    device = poses.device
+    B = poses.shape[0]
+    fx, fy, cx, cy = intrinsics
+    i, j = custom_meshgrid(torch.linspace(0, W-1, W, device=device), torch.linspace(0, H-1, H, device=device))
+    i = i.t().reshape([1, H*W]).expand([B, H*W]) + 0.5
+    j = j.t().reshape([1, H*W]).expand([B, H*W]) + 0.5
+
+    results = {}
+    inds = y*W+x
+    rays_patch_o = torch.zeros((B, PS*2+1, PS*2+1, 3), device=device)
+    rays_patch_d = torch.zeros((B, PS*2+1, PS*2+1, 3), device=device)
+    for c_i in range(PS * 2 + 1):
+        for c_j in range(PS * 2 + 1):
+            off_i = c_i - PS
+            off_j = c_j - PS
+            ig = torch.gather(i + off_i, -1, inds)
+            jg = torch.gather(j + off_j, -1, inds)
+            zs = torch.ones_like(ig)
+            xs = (ig - cx) / fx * zs
+            ys = (jg - cy) / fy * zs
+            directions = torch.stack((xs, ys, zs), dim=-1)
+            directions = directions / torch.norm(directions, dim=-1, keepdim=True)
+            rays_d = directions @ poses[:, :3, :3].transpose(-1, -2)  # (B, N, 3)
+            rays_o = poses[..., :3, 3]  # [B, 3]
+            rays_o = rays_o[..., None, :].expand_as(rays_d)  # [B, N, 3]
+            rays_patch_d[:, :, c_j, c_i, :] = rays_d
+            rays_patch_o[:, :, c_j, c_i, :] = rays_o
+
+    results['rays_patch_o'] = rays_patch_o
+    results['rays_patch_d'] = rays_patch_d
+    results['patch_size'] = PS
+    return results
+
 
 @torch.cuda.amp.autocast(enabled=False)
 def get_rays(poses, intrinsics, H, W, N=-1, error_map=None):
@@ -241,10 +287,10 @@ class ImgFE:
         self.efficientnet = nn.Sequential(*list(model.children())[:-1])
         self.efficientnet.eval().to(self.device)
 
-    def extract(self, images):
+    def extract(self, images, resolution=(224, 224)):
         with torch.no_grad():
             images = images.permute(0, 3, 1, 2).to(self.device)
-            images = T.Resize((224, 224))(images)
+            images = T.Resize(resolution)(images)
             output = torch.nn.functional.softmax(self.efficientnet(images), dim=1)
         return output
 
