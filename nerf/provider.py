@@ -8,10 +8,10 @@ import numpy as np
 from scipy.spatial.transform import Slerp, Rotation
 
 import trimesh
-
+import open3d as o3d
 import torch
 from torch.utils.data import DataLoader
-from .utils import get_rays, get_patchrays, ImgFE, srgb_to_linear, torch_vis_2d
+from .utils import get_rays, get_all_rays, get_patchrays, ImgFE, srgb_to_linear, torch_vis_2d
 
 
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
@@ -25,6 +25,23 @@ def nerf_matrix_to_ngp(pose, scale=0.33, offset=[0, 0, 0]):
     ], dtype=np.float32)
     return new_pose
 
+
+def visualize_rays(rays_o, rays_d):
+    rays_d_np = torch.clone(rays_o.cpu().detach()).numpy()
+    rays_o_np = torch.clone(rays_d.cpu().detach()).numpy()
+    B = rays_o_np.shape[0]
+    for i in range(B):
+        points_end = (rays_d_np[i] + rays_o_np[i]).reshape((-1, 3))
+        points_start = rays_o_np[i].reshape((-1, 3))
+        lines = []
+        for i in range(points_start.shape[0]):
+            lines.append([i, i+points_start.shape[0]])
+        points = np.concatenate([points_start, points_end], axis=0)
+        line_set = o3d.geometry.LineSet()
+        line_set.points = o3d.utility.Vector3dVector(points)
+        line_set.lines = o3d.utility.Vector2iVector(lines)
+        o3d.visualization.draw_geometries([line_set])
+    return rays_o_np
 
 def visualize_poses(poses, size=0.1):
     # poses: [B, 4, 4]
@@ -52,6 +69,52 @@ def visualize_poses(poses, size=0.1):
 
     trimesh.Scene(objects).show()
 
+
+def perturb_poses(poses, delta_trans=1 / 15, delta_angle=np.pi / 32):
+    ''' generate random poses from an orbit camera
+    Args:
+        poses: [size, 4, 4].
+        delta_trans: float
+        delta_angle: float
+
+    Return:
+        pposes: [size, 4, 4]
+    '''
+    size = poses.shape[0]
+    device = poses.device
+    angles = np.random.rand(size, 3) * delta_angle
+    trans = torch.tensor(np.random.rand(size, 3) * delta_trans, dtype=torch.float, device=device)
+    shape = (size, 4, 4)
+    pposes = np.zeros(shape)
+    idx = np.arange(shape[1])
+    pposes[:, idx, idx] = 1
+    pposes[:, :3, :3] = Rotation.from_euler('zyx', angles).as_matrix()
+    pposes = torch.tensor(pposes, dtype=torch.float, device=device)
+    pposes = torch.bmm(pposes, poses)
+    pposes[:, :3, 3] = pposes[:, :3, 3] + trans
+    return pposes
+
+
+
+
+    centers = torch.stack([
+        radius * torch.sin(thetas) * torch.sin(phis),
+        radius * torch.cos(thetas),
+        radius * torch.sin(thetas) * torch.cos(phis),
+    ], dim=-1)  # [B, 3]
+
+    # lookat
+    forward_vector = - normalize(centers)
+    up_vector = torch.FloatTensor([0, -1, 0]).to(device).unsqueeze(0).repeat(size,
+                                                                             1)  # confused at the coordinate system...
+    right_vector = normalize(torch.cross(forward_vector, up_vector, dim=-1))
+    up_vector = normalize(torch.cross(right_vector, forward_vector, dim=-1))
+
+    poses = torch.eye(4, dtype=torch.float, device=device).unsqueeze(0).repeat(size, 1, 1)
+    poses[:, :3, :3] = torch.stack((right_vector, up_vector, forward_vector), dim=-1)
+    poses[:, :3, 3] = centers
+
+    return poses
 
 def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_range=[0, 2*np.pi]):
     ''' generate random poses from an orbit camera
@@ -90,7 +153,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
     return poses
 
 
-def extract_patches_from_images(images, inds, patch_size):
+def extract_patches_from_images(images, inds, psh, psw):
     #  input  images [B, H, W, 3/4]
     #  output  images [B, N, PS, PS, 3/4]
     B = images.shape[0]
@@ -98,14 +161,14 @@ def extract_patches_from_images(images, inds, patch_size):
     W = images.shape[2]
     C = images.shape[3]
     N = inds.shape[1]
-    img_result = torch.zeros((B, N, patch_size*2+1, patch_size*2+1, C))
+    img_result = torch.zeros((B, N, psh*2+1, psw*2+1, C))
     #
-    for c_i in range(patch_size * 2 + 1):
-        for c_j in range(patch_size * 2 + 1):
-            off_i = c_i - patch_size
-            off_j = c_j - patch_size
+    for c_i in range(psw * 2 + 1):
+        for c_j in range(psh * 2 + 1):
+            off_i = c_i - psw
+            off_j = c_j - psh
             # shift and crop images in order to make inds correct (as they correspond to a crop)
-            shifted_images = images[:, patch_size+off_j:H-patch_size+off_j, patch_size+off_i:W-patch_size+off_i, :]
+            shifted_images = images[:, psh+off_j:H-psh+off_j, psw+off_i:W-psw+off_i, :]
             #  must reshape
             shifted_images = torch.gather(shifted_images.reshape(B, -1, C), 1, torch.stack(C * [inds], -1))  # [B, N, 3/4]
             img_result[:, :, c_j, c_i, :] = shifted_images
@@ -124,7 +187,7 @@ class NeRFDataset:
         self.preload = opt.preload # preload data into GPU
         self.scale = opt.scale # camera radius scale to make sure camera are inside the bounding box.
         self.offset = opt.offset # camera offset
-        self.img_resolution_ff = (opt.img_resolution_ff[0], opt.img_resolution_ff[1])  # input resolution for feature extractor
+        self.fe_input_res = (opt.fe_input_res[0], opt.fe_input_res[1])  # input resolution for feature extractor
         self.bound = opt.bound # bounding box half length, also used as the radius to random sample poses.
         self.fp16 = opt.fp16 # if preload, load into fp16.
         self.training = self.type in ['train', 'all', 'trainval']
@@ -251,7 +314,7 @@ class NeRFDataset:
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
-            self.features = self.feature_extractor.extract(self.images, self.img_resolution_ff) # [N, C, H, W]
+            self.features = self.feature_extractor.extract(self.images, self.fe_input_res) # [N, C, H, W]
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
@@ -342,12 +405,21 @@ class NeRFDataset:
                 images = torch.gather(imgs.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
                 # patches
                 rays_on_patch = get_patchrays(poses, self.intrinsics, self.H, self.W, self.num_rays)
-                images_on_patch = extract_patches_from_images(imgs, rays_on_patch['inds'], rays_on_patch['patch_size'])
+                psh, psw = rays_on_patch['patch_size']
+                images_on_patch = extract_patches_from_images(imgs, rays_on_patch['inds'], psh, psw)
                 results['images_patch'] = images_on_patch.to(self.device)
                 results['rays_patch_o'] = rays_on_patch['rays_patch_o']
                 results['rays_patch_d'] = rays_on_patch['rays_patch_d']
 
+                # features
                 feature = self.features[index].to(self.device)
+                perturbed_poses = perturb_poses(poses)
+                all_rays = get_all_rays(perturbed_poses, self.intrinsics, self.H, self.W)
+                results["feature"] = feature
+                results["all_rays"] = all_rays
+                #visualize_rays(all_rays['rays_o'][:, :100, :-10, :], all_rays['rays_d'][:, :100, :-10, :])
+                #visualize_poses(torch.cat([poses, perturbed_poses], dim=0).cpu().detach().numpy(), size=0.1)
+
 
             results['images'] = images
 
