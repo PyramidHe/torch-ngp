@@ -122,7 +122,31 @@ class NeRFRenderer(nn.Module):
         self.mean_count = 0
         self.local_step = 0
 
-    def run_patch(self, rays_patch_o, rays_patch_d, num_steps=128, upsample_steps=128, bg_color=None, perturb=False, **kwargs):
+    def run_for_features(self, all_rays_o, all_rays_d, height, width, num_steps=128, upsample_steps=128, bg_color=None):
+        # rays_o, rays_d: [B, N, 3], assumes B == 1
+        # bg_color: [3] in range [0, 1]
+        # return: image: [B, N, 3], depth: [B, N]
+        # rays_o, rays_d: [B, N, PS * 2 + 1, PS * 2 + 1, 3]
+        B = all_rays_o.shape[0]
+        or_height = all_rays_o.shape[1]
+        or_widtht = all_rays_o.shape[2]
+        hstep = or_height/height
+        wstep = or_widtht/width
+        image = torch.zeros(B, height, width, 3)
+        for y in range(height):
+            for x in range(width):
+                min_y = math.floor(y * hstep)
+                min_x = math.floor(x * wstep)
+                max_y = min(math.ceil((y + 1) * hstep), height)
+                max_x = min(math.ceil((x + 1) * wstep), width)
+                rays_patch_o = all_rays_o[:, min_y: max_y, min_x:max_x, :]
+                rays_patch_d = all_rays_d[:, min_y: max_y, min_x:max_x, :]
+                result = self.run_patch(rays_patch_o, rays_patch_d, num_steps, upsample_steps, bg_color)
+                image[:, y, x, :] = result['image']
+
+        return image
+
+    def run_patch(self, rays_patch_o, rays_patch_d, num_steps=128, upsample_steps=128, bg_color=None, perturb=False):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
         # return: image: [B, N, 3], depth: [B, N]

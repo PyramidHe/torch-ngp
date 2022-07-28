@@ -503,6 +503,21 @@ class Trainer(object):
         loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
 
+        # features
+        features = data['features']
+        all_rays = data['all_rays']
+        fe_input_height = data['HF']
+        fe_input_width = data['WF']
+        out_features = self.model.run_for_features(all_rays['rays_o'], all_rays['rays_d'], fe_input_height, fe_input_width)
+        rays_patch_d = data['rays_patch_d']
+        outputs_patch = self.model.run_patch(rays_patch_o, rays_patch_d)
+        full_patch_size = rays_patch_o.shape[-2]
+        images_patch = data['images_patch']
+        pred_rgb_patch = outputs_patch['image']
+        gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
+        loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
+        # loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
+
           # [B, N, 3] --> [B, N]
         if True:
             index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:50]

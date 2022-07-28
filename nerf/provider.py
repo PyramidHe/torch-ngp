@@ -412,11 +412,13 @@ class NeRFDataset:
                 results['rays_patch_d'] = rays_on_patch['rays_patch_d']
 
                 # features
-                feature = self.features[index].to(self.device)
+                features = self.features[index].to(self.device)
                 perturbed_poses = perturb_poses(poses)
                 all_rays = get_all_rays(perturbed_poses, self.intrinsics, self.H, self.W)
-                results["feature"] = feature
+                results["features"] = features
                 results["all_rays"] = all_rays
+                results["HF"] = self.fe_input_res[0]
+                results["WF"] = self.fe_input_res[0]
                 #visualize_rays(all_rays['rays_o'][:, :100, :-10, :], all_rays['rays_d'][:, :100, :-10, :])
                 #visualize_poses(torch.cat([poses, perturbed_poses], dim=0).cpu().detach().numpy(), size=0.1)
 
