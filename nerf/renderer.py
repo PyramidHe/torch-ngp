@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import raymarching
-from .utils import custom_meshgrid
+from .utils import custom_meshgrid, ImgFE
 
 def sample_pdf(bins, weights, n_samples, det=False):
     # This implementation is from NeRF
@@ -68,7 +68,7 @@ class NeRFRenderer(nn.Module):
                  bg_radius=-1,
                  ):
         super().__init__()
-
+        self.feature_extractor=None
         self.bound = bound
         self.cascade = 1 + math.ceil(math.log2(bound))
         self.grid_size = 128
@@ -122,6 +122,9 @@ class NeRFRenderer(nn.Module):
         self.mean_count = 0
         self.local_step = 0
 
+    def set_feature_extractor(self, device):
+        self.feature_extractor = ImgFE(device)
+
     def run_for_features(self, all_rays_o, all_rays_d, height, width, num_steps=128, upsample_steps=128, bg_color=None):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
@@ -129,43 +132,46 @@ class NeRFRenderer(nn.Module):
         # rays_o, rays_d: [B, N, PS * 2 + 1, PS * 2 + 1, 3]
         B = all_rays_o.shape[0]
         or_height = all_rays_o.shape[1]
-        or_widtht = all_rays_o.shape[2]
+        or_width = all_rays_o.shape[2]
         hstep = or_height/height
-        wstep = or_widtht/width
+        wstep = or_width/width
         image = torch.zeros(B, height, width, 3)
         for y in range(height):
             for x in range(width):
                 min_y = math.floor(y * hstep)
                 min_x = math.floor(x * wstep)
-                max_y = min(math.ceil((y + 1) * hstep), height)
-                max_x = min(math.ceil((x + 1) * wstep), width)
-                rays_patch_o = all_rays_o[:, min_y: max_y, min_x:max_x, :]
-                rays_patch_d = all_rays_d[:, min_y: max_y, min_x:max_x, :]
+                max_y = min(math.ceil((y + 1) * hstep), or_height)
+                max_x = min(math.ceil((x + 1) * wstep), or_width)
+                rays_patch_o = all_rays_o[:, None, min_y: max_y, min_x:max_x, :]
+                rays_patch_d = all_rays_d[:, None, min_y: max_y, min_x:max_x, :]
                 result = self.run_patch(rays_patch_o, rays_patch_d, num_steps, upsample_steps, bg_color)
                 image[:, y, x, :] = result['image']
-
-        return image
+        features = self.feature_extractor.extract(image, (height, width))
+        return features
 
     def run_patch(self, rays_patch_o, rays_patch_d, num_steps=128, upsample_steps=128, bg_color=None, perturb=False):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
         # return: image: [B, N, 3], depth: [B, N]
         # rays_o, rays_d: [B, N, PS * 2 + 1, PS * 2 + 1, 3]
-        full_patch_size = rays_patch_d.shape[-2]
-        center_index = (full_patch_size-1)//2
-        last_index = full_patch_size - 1
+        full_patch_size_h = rays_patch_d.shape[-3]
+        full_patch_size_w = rays_patch_d.shape[-2]
+        center_index_h = (full_patch_size_h - 1)//2
+        center_index_w = (full_patch_size_w - 1) // 2
+        last_index_h = full_patch_size_h - 1
+        last_index_w = full_patch_size_w - 1
         prefix = rays_patch_o.shape[:-3]
-        rays_patch_o = rays_patch_o.contiguous().view(-1, full_patch_size, full_patch_size, 3)
-        rays_patch_d = rays_patch_d.contiguous().view(-1, full_patch_size, full_patch_size, 3)
+        rays_patch_o = rays_patch_o.contiguous().view(-1, full_patch_size_h, full_patch_size_w, 3)
+        rays_patch_d = rays_patch_d.contiguous().view(-1, full_patch_size_h, full_patch_size_w, 3)
         N = rays_patch_o.shape[0]  # N = B * N, in fact
         device = rays_patch_o.device
 
-        rays_center_d = rays_patch_d[..., center_index, center_index, :]
-        rays_center_o = rays_patch_o[..., center_index, center_index, :]
+        rays_center_d = rays_patch_d[..., center_index_h, center_index_w, :]
+        rays_center_o = rays_patch_o[..., center_index_h, center_index_w, :]
         rays_ur_d = rays_patch_d[..., 0, 0, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
-        rays_ul_d = rays_patch_d[..., 0, last_index, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
-        rays_dr_d = rays_patch_d[..., last_index, 0, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
-        rays_dl_d = rays_patch_d[..., last_index, last_index, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
+        rays_ul_d = rays_patch_d[..., 0, last_index_w, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
+        rays_dr_d = rays_patch_d[..., last_index_h, 0, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
+        rays_dl_d = rays_patch_d[..., last_index_h, last_index_w, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
 
 
 
