@@ -387,7 +387,7 @@ class NeRFDataset:
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
-        
+
         rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
 
         results = {
@@ -411,22 +411,7 @@ class NeRFDataset:
                 results['rays_patch_o'] = rays_on_patch['rays_patch_o']
                 results['rays_patch_d'] = rays_on_patch['rays_patch_d']
 
-                # features
-                features = self.features[index].to(self.device)
-                perturbed_poses = perturb_poses(poses)
-                all_rays = get_all_rays(perturbed_poses, self.intrinsics, self.H, self.W)
-                results["features"] = features
-                results["all_rays"] = all_rays
-                results["HF"] = self.fe_input_res[0]
-                results["WF"] = self.fe_input_res[0]
-                #visualize_rays(all_rays['rays_o'][:, :100, :-10, :], all_rays['rays_d'][:, :100, :-10, :])
-                #visualize_poses(torch.cat([poses, perturbed_poses], dim=0).cpu().detach().numpy(), size=0.1)
-
-
             results['images'] = images
-
-
-
 
 
         # need inds to update error_map
@@ -436,11 +421,35 @@ class NeRFDataset:
             
         return results
 
-    def dataloader(self):
+    def collate_feature(self, index):
+        poses = self.poses[index].to(self.device)  # [B, 4, 4]
+        results = {}
+
+        # features
+        features = self.features[index].to(self.device)
+        perturbed_poses = perturb_poses(poses)
+        all_rays = get_all_rays(perturbed_poses, self.intrinsics, self.H, self.W)
+        results["features"] = features
+        results["all_rays"] = all_rays
+        results["HF"] = self.fe_input_res[0]
+        results["WF"] = self.fe_input_res[0]
+        # visualize_rays(all_rays['rays_o'][:, :100, :-10, :], all_rays['rays_d'][:, :100, :-10, :])
+        # visualize_poses(torch.cat([poses, perturbed_poses], dim=0).cpu().detach().numpy(), size=0.1)
+
+        # need inds to update error_map
+        return results
+
+    def dataloader(self, mode='default'):
         size = len(self.poses)
+        collate_fn = None
+        if mode == 'default':
+            collate_fn = self.collate
+        elif mode == 'feature':
+            collate_fn = self.collate_feature
         if self.training and self.rand_pose > 0:
             size += size // self.rand_pose # index >= size means we use random pose.
-        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
+        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=collate_fn, shuffle=self.training, num_workers=0)
         loader._data = self # an ugly fix... we need to access error_map & poses in trainer.
         loader.has_gt = self.images is not None
         return loader
+

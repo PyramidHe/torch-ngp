@@ -123,8 +123,9 @@ if __name__ == '__main__':
     else:
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
-
-        train_loader = NeRFDataset(opt, device=device, type='train').dataloader()
+        dataset = NeRFDataset(opt, device=device, type='train')
+        train_loader = dataset.dataloader()
+        feature_train_loader = dataset.dataloader(mode='feature')
 
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
@@ -139,7 +140,8 @@ if __name__ == '__main__':
             valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
-            trainer.train(train_loader, valid_loader, max_epoch)
+            #trainer.train(train_loader, valid_loader, max_epoch)
+            trainer.feature_train(train_loader, max_epoch)
 
             # also test
             test_loader = NeRFDataset(opt, device=device, type='test').dataloader()

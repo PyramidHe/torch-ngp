@@ -258,10 +258,9 @@ class ImgFE:
         self.efficientnet.eval().to(self.device)
 
     def extract(self, images, resolution=(224, 224)):
-        with torch.no_grad():
-            images = images.permute(0, 3, 1, 2).to(self.device)
-            images = T.Resize(resolution)(images)
-            output = self.efficientnet(images)
+        images = images.permute(0, 3, 1, 2).to(self.device)
+        images = T.Resize(resolution)(images)
+        output = self.efficientnet(images)
         return output
 
 
@@ -448,6 +447,16 @@ class Trainer(object):
                 self.log_ptr.flush() # write immediately to file
 
     ### ------------------------------
+    def feature_train_step(self, data):
+        #features
+        features = data['features']
+        all_rays = data['all_rays']
+        fe_input_height = data['HF']
+        fe_input_width = data['WF']
+        out_features = self.model.run_for_features(all_rays['rays_o'], all_rays['rays_d'], fe_input_height, fe_input_width)
+        feat_loss = self.criterion(out_features, features).mean(-1).mean()
+        return feat_loss
+
     def train_step(self, data):
 
         rays_o = data['rays_o'] # [B, N, 3]
@@ -502,15 +511,6 @@ class Trainer(object):
         gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
         loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
-
-        # features
-        features = data['features']
-        all_rays = data['all_rays']
-        fe_input_height = data['HF']
-        fe_input_width = data['WF']
-        out_features = self.model.run_for_features(all_rays['rays_o'], all_rays['rays_d'], fe_input_height, fe_input_width)
-        loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
-        # loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
 
           # [B, N, 3] --> [B, N]
         if True:
@@ -654,6 +654,21 @@ class Trainer(object):
             if self.epoch % self.eval_interval == 0:
                 self.evaluate_one_epoch(valid_loader)
                 self.save_checkpoint(full=False, best=True)
+
+        if self.use_tensorboardX and self.local_rank == 0:
+            self.writer.close()
+
+    def feature_train(self, feature_train_loader, max_epochs):
+        if self.use_tensorboardX and self.local_rank == 0:
+            self.writer = tensorboardX.SummaryWriter(os.path.join(self.workspace, "run", self.name))
+
+        for epoch in range(self.epoch, max_epochs + 1):
+            self.epoch = epoch
+
+            self.feature_train_one_epoch(feature_train_loader)
+
+            if self.workspace is not None and self.local_rank == 0:
+                self.save_checkpoint(full=True, best=False)
 
         if self.use_tensorboardX and self.local_rank == 0:
             self.writer.close()
@@ -899,6 +914,86 @@ class Trainer(object):
 
         self.log(f"==> Finished Epoch {self.epoch}.")
 
+    def feature_train_one_epoch(self, loader):
+        self.log(f"==> Start Training Epoch {self.epoch}, lr={self.optimizer.param_groups[0]['lr']:.6f} ...")
+
+        total_loss = 0
+        if self.local_rank == 0 and self.report_metric_at_train:
+            for metric in self.metrics:
+                metric.clear()
+
+        self.model.train()
+
+        # distributedSampler: must call set_epoch() to shuffle indices across multiple epochs
+        # ref: https://pytorch.org/docs/stable/data.html
+        if self.world_size > 1:
+            loader.sampler.set_epoch(self.epoch)
+
+        if self.local_rank == 0:
+            pbar = tqdm.tqdm(total=len(loader) * loader.batch_size,
+                             bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+
+        self.local_step = 0
+
+        for data in loader:
+
+            # update grid every 16 steps
+            if self.model.cuda_ray and self.global_step % self.opt.update_extra_interval == 0:
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    self.model.update_extra_state()
+
+            self.local_step += 1
+            self.global_step += 1
+
+            self.optimizer.zero_grad()
+
+            with torch.cuda.amp.autocast(enabled=self.fp16):
+                loss = self.feature_train_step(data)
+
+            self.scaler.scale(loss).backward(retain_graph=True)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            if self.scheduler_update_every_step:
+                self.lr_scheduler.step()
+
+            loss_val = loss.item()
+            total_loss += loss_val
+
+            if self.local_rank == 0:
+                if self.use_tensorboardX:
+                    self.writer.add_scalar("train/loss", loss_val, self.global_step)
+                    self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]['lr'], self.global_step)
+
+                if self.scheduler_update_every_step:
+                    pbar.set_description(
+                        f"loss={loss_val:.4f} ({total_loss / self.local_step:.4f}), lr={self.optimizer.param_groups[0]['lr']:.6f}")
+                else:
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss / self.local_step:.4f})")
+                pbar.update(loader.batch_size)
+
+        if self.ema is not None:
+            self.ema.update()
+
+        average_loss = total_loss / self.local_step
+        self.stats["loss"].append(average_loss)
+
+        if self.local_rank == 0:
+            pbar.close()
+            if self.report_metric_at_train:
+                for metric in self.metrics:
+                    self.log(metric.report(), style="red")
+                    if self.use_tensorboardX:
+                        metric.write(self.writer, self.epoch, prefix="train")
+                    metric.clear()
+
+        if not self.scheduler_update_every_step:
+            if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.lr_scheduler.step(average_loss)
+            else:
+                self.lr_scheduler.step()
+
+        self.log(f"==> Finished Epoch {self.epoch}.")
 
     def evaluate_one_epoch(self, loader, name=None):
         self.log(f"++> Evaluate at epoch {self.epoch} ...")
