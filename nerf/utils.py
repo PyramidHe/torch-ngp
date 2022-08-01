@@ -508,6 +508,7 @@ class Trainer(object):
         full_patch_size = rays_patch_o.shape[-2]
         images_patch = data['images_patch']
         pred_rgb_patch = outputs_patch['image']
+        entropy_loss = outputs_patch['entropy_loss']
         gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
         loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
@@ -528,7 +529,7 @@ class Trainer(object):
                                       **vars(self.opt))
                     depths_patch[:, :, y, x] = outputs_patch['depth']
                     #loss += self.criterion(outputs_patch['image'], images_patch[:, :, y, x, :]).mean(-1).mean()
-            loss = loss + smooth_depth_loss(depths_patch, images_patch)
+            loss = loss + smooth_depth_loss(depths_patch, images_patch) #+ 0.02*entropy_loss
 
 
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]

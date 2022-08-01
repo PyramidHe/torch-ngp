@@ -135,17 +135,33 @@ class NeRFRenderer(nn.Module):
         or_width = all_rays_o.shape[2]
         hstep = or_height/height
         wstep = or_width/width
-        image = torch.zeros(B, height, width, 3)
-        for y in range(height):
-            for x in range(width):
-                min_y = math.floor(y * hstep)
-                min_x = math.floor(x * wstep)
-                max_y = min(math.ceil((y + 1) * hstep), or_height)
-                max_x = min(math.ceil((x + 1) * wstep), or_width)
-                rays_patch_o = all_rays_o[:, None, min_y: max_y, min_x:max_x, :]
-                rays_patch_d = all_rays_d[:, None, min_y: max_y, min_x:max_x, :]
-                result = self.run_patch(rays_patch_o, rays_patch_d, num_steps, upsample_steps, bg_color)
-                image[:, y, x, :] = result['image']
+        patch_o = all_rays_o.unfold(2, math.floor(wstep), math.floor(wstep))
+        patch_o = patch_o.unfold(1, math.floor(hstep), math.floor(hstep))
+        patch_o = patch_o.permute(0, 1, 2, 4, 5, 3).contiguous()
+        patch_o = patch_o.view(patch_o.shape[0], -1, patch_o.shape[3], patch_o.shape[4], patch_o.shape[5])
+
+        patch_d = all_rays_d.unfold(2, math.floor(wstep), math.floor(wstep))
+        patch_d = patch_d.unfold(1, math.floor(hstep), math.floor(hstep))
+        patch_d = patch_d.permute(0, 1, 2, 4, 5, 3).contiguous()
+        prefix = patch_d.shape[:3]
+        patch_d = patch_d.view(patch_d.shape[0], -1, patch_d.shape[3], patch_d.shape[4], patch_d.shape[5])
+        result = self.run_patch(patch_o, patch_d, num_steps, upsample_steps, bg_color)
+        image = result['image']
+        image = image.view(*prefix, 3).permute(0, 3, 1, 2)
+        image = torch.nn.functional.interpolate(image, (height, width))
+        image = image.permute(0, 2, 3, 1)
+        #image = torch.zeros(B, height, width, 3).cuda()
+        # for y in range(height):
+        #     for x in range(width):
+        #         min_y = math.floor(y * hstep)
+        #         min_x = math.floor(x * wstep)
+        #         max_y = min(math.ceil((y + 1) * hstep), or_height)
+        #         max_x = min(math.ceil((x + 1) * wstep), or_width)
+        #         rays_patch_o = all_rays_o[:, None, min_y: max_y, min_x:max_x, :]
+        #         rays_patch_d = all_rays_d[:, None, min_y: max_y, min_x:max_x, :]
+        #
+        #         result = self.run_patch(rays_patch_o, rays_patch_d, num_steps, upsample_steps, bg_color)
+        #         image[:, y, x, :] = result['image']
         features = self.feature_extractor.extract(image, (height, width))
         return features
 

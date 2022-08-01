@@ -141,7 +141,7 @@ if __name__ == '__main__':
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             #trainer.train(train_loader, valid_loader, max_epoch)
-            trainer.feature_train(train_loader, max_epoch)
+            trainer.feature_train(feature_train_loader, max_epoch)
 
             # also test
             test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
