@@ -48,7 +48,7 @@ def srgb_to_linear(x):
     return torch.where(x < 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
 
 @torch.cuda.amp.autocast(enabled=False)
-def get_patchrays(poses, intrinsics, H, W, N, PSH=4, PSW=4):
+def get_patchrays(poses, intrinsics, H, W, N, PSH=7, PSW=7):
     ''' get rays collected in patches
     Args:
         poses: [B, 4, 4], cam2world
@@ -504,18 +504,23 @@ class Trainer(object):
         # patch
         rays_patch_o = data['rays_patch_o']
         rays_patch_d = data['rays_patch_d']
+        pe = min(self.epoch//20, 7)
+        images_patch = data['images_patch']
+        if pe>0:
+            rays_patch_o = rays_patch_o[:, :, pe:-pe, pe:-pe]
+            rays_patch_d = rays_patch_d[:, :, pe:-pe, pe:-pe]
+            images_patch = data['images_patch'][:,:, pe:-pe, pe:-pe]
         outputs_patch = self.model.run_patch(rays_patch_o, rays_patch_d)
         full_patch_size = rays_patch_o.shape[-2]
-        images_patch = data['images_patch']
+
         pred_rgb_patch = outputs_patch['image']
-        entropy_loss = outputs_patch['entropy_loss']
         gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
         loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
 
           # [B, N, 3] --> [B, N]
         if True:
-            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:50]
+            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:40]
             rays_patch_o = torch.index_select(rays_patch_o, dim=1, index=index)
             rays_patch_d = torch.index_select(rays_patch_d, dim=1, index=index)
             images_patch = torch.index_select(images_patch, dim=1, index=index)

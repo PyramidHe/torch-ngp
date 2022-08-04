@@ -85,6 +85,7 @@ class NeRFRenderer(nn.Module):
         self.register_buffer('aabb_infer', aabb_infer)
 
         # extra state for cuda raymarching
+        self.local_step = 0
         self.cuda_ray = cuda_ray
         if cuda_ray:
             # density grid
@@ -98,8 +99,7 @@ class NeRFRenderer(nn.Module):
             step_counter = torch.zeros(16, 2, dtype=torch.int32) # 16 is hardcoded for averaging...
             self.register_buffer('step_counter', step_counter)
             self.mean_count = 0
-            self.local_step = 0
-    
+
     def forward(self, x, d):
         raise NotImplementedError()
 
@@ -165,7 +165,7 @@ class NeRFRenderer(nn.Module):
         features = self.feature_extractor.extract(image, (height, width))
         return features
 
-    def run_patch(self, rays_patch_o, rays_patch_d, num_steps=128, upsample_steps=128, bg_color=None, perturb=False):
+    def run_patch(self, rays_patch_o, rays_patch_d, num_steps=64, upsample_steps=192, bg_color=None, perturb=True):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
         # return: image: [B, N, 3], depth: [B, N]
@@ -188,10 +188,6 @@ class NeRFRenderer(nn.Module):
         rays_ul_d = rays_patch_d[..., 0, last_index_w, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
         rays_dr_d = rays_patch_d[..., last_index_h, 0, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
         rays_dl_d = rays_patch_d[..., last_index_h, last_index_w, :].unsqueeze(dim=-1).expand((prefix[0]*prefix[1], 3, num_steps))
-
-
-
-
 
 
         # choose aabb
@@ -241,6 +237,11 @@ class NeRFRenderer(nn.Module):
 
         # upsample z_vals (nerf-like)
         if upsample_steps > 0:
+            rays_ur_d = rays_patch_d[..., 0, 0, :].unsqueeze(dim=-1).expand((prefix[0] * prefix[1], 3, upsample_steps))
+            rays_ul_d = rays_patch_d[..., 0, last_index_w, :].unsqueeze(dim=-1).expand((prefix[0] * prefix[1], 3, upsample_steps))
+            rays_dr_d = rays_patch_d[..., last_index_h, 0, :].unsqueeze(dim=-1).expand((prefix[0] * prefix[1], 3, upsample_steps))
+            rays_dl_d = rays_patch_d[..., last_index_h, last_index_w, :].unsqueeze(dim=-1).expand((prefix[0] * prefix[1], 3, upsample_steps))
+
             offulr = torch.rand(N, upsample_steps, device=device)[:, None, :]
             offdlr = torch.rand(N, upsample_steps, device=device)[:, None, :]
             offud = torch.rand(N, upsample_steps, device=device)[:, None, :]
@@ -257,12 +258,31 @@ class NeRFRenderer(nn.Module):
                 alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1)  # [N, T+1]
                 weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1]  # [N, T]
 
-                # sample new z_vals
-                z_vals_mid = (z_vals[..., :-1] + 0.5 * deltas[..., :-1])  # [N, T-1]
-                new_z_vals = sample_pdf(z_vals_mid, weights[:, 1:-1], upsample_steps,
-                                        det=not self.training).detach()  # [N, t]
+                # Restrict area
+                acc = torch.sum(weights, -1).unsqueeze(-1)
+                density_mask = acc > 0.1
 
-                new_xyzs = rays_center_o.unsqueeze(-2) + rays_d * new_z_vals.unsqueeze(
+                beta = 0.05
+                self.local_step += 1
+                k_max = (fars - nears)/2
+                k_min = k_max * beta
+                beta = math.exp(-(self.local_step * beta*10))
+                delta = torch.max(k_max * beta, k_min)
+                #print(self.local_step)
+                depth = torch.sum(weights * z_vals, dim=-1).unsqueeze(-1)
+                new_z_vals = torch.linspace(0.0, 1.0, upsample_steps, device=device).unsqueeze(0)  # [1, T]
+                new_z_vals = new_z_vals.expand((N, upsample_steps))  # [N, T]
+                new_z_vals = (depth - delta) + 2 * delta * new_z_vals# [N, T], in [nears, fars]
+
+                z_vals_ld = torch.linspace(0.0, 1.0, upsample_steps, device=device).unsqueeze(0)  # [1, T]
+                z_vals_ld = z_vals_ld.expand((N, upsample_steps))  # [N, T]
+                z_vals_ld = nears + (fars - nears) * z_vals_ld
+                new_z_vals = torch.where(acc > 0.5, new_z_vals, z_vals_ld)
+                # z_vals_mid = (z_vals[..., :-1] + 0.5 * deltas[..., :-1])  # [N, T-1]
+                # new_z_vals = sample_pdf(z_vals_mid, weights[:, 1:-1], upsample_steps,
+                #                      det=not self.training).detach()  # [N, t]
+
+                new_xyzs = rays_center_o.unsqueeze(-2) + new_rays_d * new_z_vals.unsqueeze(
                     -1)  # [N, 1, 3] * [N, t, 1] -> [N, t, 3]
                 new_xyzs = torch.min(torch.max(new_xyzs, aabb[:3]), aabb[3:])  # a manual clip.
 
