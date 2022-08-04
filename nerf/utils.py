@@ -462,23 +462,6 @@ class Trainer(object):
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
 
-        # if there is no gt image, we train with CLIP loss.
-        if 'images' not in data:
-
-            B, N = rays_o.shape[:2]
-            H, W = data['H'], data['W']
-
-            # currently fix white bg, MUST force all rays!
-            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, perturb=True, force_all_rays=True, **vars(self.opt))
-            pred_rgb = outputs['image'].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
-
-            # [debug] uncomment to plot the images used in train_step
-            #torch_vis_2d(pred_rgb[0])
-
-            loss = self.clip_loss(pred_rgb)
-            
-            return pred_rgb, None, loss
-
         images = data['images'] # [B, N, 3/4]
 
         B, N, C = images.shape
@@ -520,20 +503,17 @@ class Trainer(object):
 
           # [B, N, 3] --> [B, N]
         if True:
-            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:40]
+            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:10]
             rays_patch_o = torch.index_select(rays_patch_o, dim=1, index=index)
             rays_patch_d = torch.index_select(rays_patch_d, dim=1, index=index)
+            pshape = rays_patch_o.shape
+            rays_patch_o = rays_patch_o.contiguous().view(pshape[0], pshape[1]*pshape[2]*pshape[3], -1)
+            rays_patch_d = rays_patch_d.contiguous().view(pshape[0], pshape[1]*pshape[2]*pshape[3], -1)
+            outputs_patch = self.model.render(rays_patch_o, rays_patch_d,
+                                              staged=False, bg_color=bg_color, perturb=True, force_all_rays=False,
+                                              **vars(self.opt))
+            depths_patch = outputs_patch['depth'].view(*pshape[:4])
             images_patch = torch.index_select(images_patch, dim=1, index=index)
-            depths_patch = torch.zeros((rays_patch_o.shape[0], rays_patch_o.shape[1], full_patch_size, full_patch_size),
-                                       device=self.device)
-
-            for y in range(full_patch_size):
-                for x in range(full_patch_size):
-                    outputs_patch = self.model.render(rays_patch_o[:, :, y, x, :], rays_patch_d[:, :, y, x, :],
-                                      staged=False, bg_color=bg_color, perturb=True, force_all_rays=False,
-                                      **vars(self.opt))
-                    depths_patch[:, :, y, x] = outputs_patch['depth']
-                    #loss += self.criterion(outputs_patch['image'], images_patch[:, :, y, x, :]).mean(-1).mean()
             loss = loss + smooth_depth_loss(depths_patch, images_patch) #+ 0.02*entropy_loss
 
 
