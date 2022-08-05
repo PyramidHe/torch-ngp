@@ -165,7 +165,7 @@ class NeRFRenderer(nn.Module):
         features = self.feature_extractor.extract(image, (height, width))
         return features
 
-    def run_patch(self, rays_patch_o, rays_patch_d, num_steps=64, upsample_steps=192, bg_color=None, perturb=True):
+    def run_patch(self, rays_patch_o, rays_patch_d, num_steps=64, upsample_steps=192, epoch=0, bg_color=None, perturb=True):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
         # return: image: [B, N, 3], depth: [B, N]
@@ -260,23 +260,20 @@ class NeRFRenderer(nn.Module):
 
                 # Restrict area
                 acc = torch.sum(weights, -1).unsqueeze(-1)
-                density_mask = acc > 0.1
-
-                beta = 0.05
-                self.local_step += 1
+                beta = 0.001
                 k_max = (fars - nears)/2
                 k_min = k_max * beta
-                beta = math.exp(-(self.local_step * beta*10))
+                beta = math.exp(-(epoch * beta * 40))
                 delta = torch.max(k_max * beta, k_min)
-                #print(self.local_step)
                 depth = torch.sum(weights * z_vals, dim=-1).unsqueeze(-1)
                 new_z_vals = torch.linspace(0.0, 1.0, upsample_steps, device=device).unsqueeze(0)  # [1, T]
                 new_z_vals = new_z_vals.expand((N, upsample_steps))  # [N, T]
                 new_z_vals = (depth - delta) + 2 * delta * new_z_vals# [N, T], in [nears, fars]
-
                 z_vals_ld = torch.linspace(0.0, 1.0, upsample_steps, device=device).unsqueeze(0)  # [1, T]
                 z_vals_ld = z_vals_ld.expand((N, upsample_steps))  # [N, T]
                 z_vals_ld = nears + (fars - nears) * z_vals_ld
+
+
                 new_z_vals = torch.where(acc > 0.5, new_z_vals, z_vals_ld)
                 # z_vals_mid = (z_vals[..., :-1] + 0.5 * deltas[..., :-1])  # [N, T-1]
                 # new_z_vals = sample_pdf(z_vals_mid, weights[:, 1:-1], upsample_steps,
@@ -318,6 +315,8 @@ class NeRFRenderer(nn.Module):
         mask = weights > 1e-4  # hard coded
         rgbs = self.color(xyzs.reshape(-1, 3), dirs.reshape(-1, 3), mask=mask.reshape(-1), **density_outputs)
         rgbs = rgbs.view(N, -1, 3)  # [N, T+t, 3]
+
+        ## Derivative loss ##
 
         # print(xyzs.shape, 'valid_rgb:', mask.sum().item())
 
@@ -481,6 +480,132 @@ class NeRFRenderer(nn.Module):
         return {
             'depth': depth,
             'image': image,
+        }
+
+    def run_depth(self, rays_o, rays_d, num_steps=64, upsample_steps=192, epoch=0, bg_color=None, perturb=False, **kwargs):
+        # rays_o, rays_d: [B, N, 3], assumes B == 1
+        # bg_color: [3] in range [0, 1]
+        # return: image: [B, N, 3], depth: [B, N]
+
+        prefix = rays_o.shape[:-1]
+        rays_o = rays_o.contiguous().view(-1, 3)
+        rays_d = rays_d.contiguous().view(-1, 3)
+
+        N = rays_o.shape[0]  # N = B * N, in fact
+        device = rays_o.device
+
+        # choose aabb
+        aabb = self.aabb_train if self.training else self.aabb_infer
+
+        # sample steps
+        nears, fars = raymarching.near_far_from_aabb(rays_o, rays_d, aabb, self.min_near)
+        nears.unsqueeze_(-1)
+        fars.unsqueeze_(-1)
+
+        # print(f'nears = {nears.min().item()} ~ {nears.max().item()}, fars = {fars.min().item()} ~ {fars.max().item()}')
+
+        z_vals = torch.linspace(0.0, 1.0, num_steps, device=device).unsqueeze(0)  # [1, T]
+        z_vals = z_vals.expand((N, num_steps))  # [N, T]
+        z_vals = nears + (fars - nears) * z_vals  # [N, T], in [nears, fars]
+
+        # perturb z_vals
+        sample_dist = (fars - nears) / num_steps
+        if perturb:
+            z_vals = z_vals + (torch.rand(z_vals.shape, device=device) - 0.5) * sample_dist
+            # z_vals = z_vals.clamp(nears, fars) # avoid out of bounds xyzs.
+
+        # generate xyzs
+        xyzs = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1)  # [N, 1, 3] * [N, T, 1] -> [N, T, 3]
+        xyzs = torch.min(torch.max(xyzs, aabb[:3]), aabb[3:])  # a manual clip.
+
+        # plot_pointcloud(xyzs.reshape(-1, 3).detach().cpu().numpy())
+
+        # query SDF and RGB
+        density_outputs = self.density(xyzs.reshape(-1, 3))
+
+        # sigmas = density_outputs['sigma'].view(N, num_steps) # [N, T]
+        for k, v in density_outputs.items():
+            density_outputs[k] = v.view(N, num_steps, -1)
+
+        # upsample z_vals (nerf-like)
+        if upsample_steps > 0:
+            with torch.no_grad():
+
+                deltas = z_vals[..., 1:] - z_vals[..., :-1]  # [N, T-1]
+                deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[..., :1])], dim=-1)
+
+                alphas = 1 - torch.exp(-deltas * self.density_scale * density_outputs['sigma'].squeeze(-1))  # [N, T]
+                alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1)  # [N, T+1]
+                weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1]  # [N, T]
+
+                # sample new z_vals
+
+                acc = torch.sum(weights, -1).unsqueeze(-1)
+                beta = 0.001
+                k_max = (fars - nears)/2
+                k_min = k_max * beta
+                beta = math.exp(-(epoch * beta * 40))
+                delta = torch.max(k_max * beta, k_min)
+                depth = torch.sum(weights * z_vals, dim=-1).unsqueeze(-1)
+                new_z_vals = torch.linspace(0.0, 1.0, upsample_steps, device=device).unsqueeze(0)  # [1, T]
+                new_z_vals = new_z_vals.expand((N, upsample_steps))  # [N, T]
+                new_z_vals = (depth - delta) + 2 * delta * new_z_vals# [N, T], in [nears, fars]
+                z_vals_ld = torch.linspace(0.0, 1.0, upsample_steps, device=device).unsqueeze(0)  # [1, T]
+                z_vals_ld = z_vals_ld.expand((N, upsample_steps))  # [N, T]
+                z_vals_ld = nears + (fars - nears) * z_vals_ld
+
+
+                new_z_vals = torch.where(acc > 0.5, new_z_vals, z_vals_ld)
+                new_xyzs = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * new_z_vals.unsqueeze(
+                    -1)  # [N, 1, 3] * [N, t, 1] -> [N, t, 3]
+                new_xyzs = torch.min(torch.max(new_xyzs, aabb[:3]), aabb[3:])  # a manual clip.
+
+            # only forward new points to save computation
+            new_density_outputs = self.density(new_xyzs.reshape(-1, 3))
+            # new_sigmas = new_density_outputs['sigma'].view(N, upsample_steps) # [N, t]
+            for k, v in new_density_outputs.items():
+                new_density_outputs[k] = v.view(N, upsample_steps, -1)
+
+            # re-order
+            z_vals = torch.cat([z_vals, new_z_vals], dim=1)  # [N, T+t]
+            z_vals, z_index = torch.sort(z_vals, dim=1)
+
+            xyzs = torch.cat([xyzs, new_xyzs], dim=1)  # [N, T+t, 3]
+            xyzs = torch.gather(xyzs, dim=1, index=z_index.unsqueeze(-1).expand_as(xyzs))
+
+            for k in density_outputs:
+                tmp_output = torch.cat([density_outputs[k], new_density_outputs[k]], dim=1)
+                density_outputs[k] = torch.gather(tmp_output, dim=1, index=z_index.unsqueeze(-1).expand_as(tmp_output))
+
+        deltas = z_vals[..., 1:] - z_vals[..., :-1]  # [N, T+t-1]
+        deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[..., :1])], dim=-1)
+        alphas = 1 - torch.exp(-deltas * self.density_scale * density_outputs['sigma'].squeeze(-1))  # [N, T+t]
+        alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1)  # [N, T+t+1]
+        weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1]  # [N, T+t]
+
+        dirs = rays_d.view(-1, 1, 3).expand_as(xyzs)
+        for k, v in density_outputs.items():
+            density_outputs[k] = v.view(-1, v.shape[-1])
+
+        mask = weights > 1e-4  # hard coded
+
+
+        # calculate weight_sum (mask)
+        weights_sum = weights.sum(dim=-1)  # [N]
+
+        # calculate depth
+        ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1)
+        depth = torch.sum(weights * ori_z_vals, dim=-1)
+        # mix background color
+        depth = depth.view(*prefix)
+
+        # tmp: reg loss in mip-nerf 360
+        # z_vals_shifted = torch.cat([z_vals[..., 1:], sample_dist * torch.ones_like(z_vals[..., :1])], dim=-1)
+        # mid_zs = (z_vals + z_vals_shifted) / 2 # [N, T]
+        # loss_dist = (torch.abs(mid_zs.unsqueeze(1) - mid_zs.unsqueeze(2)) * (weights.unsqueeze(1) * weights.unsqueeze(2))).sum() + 1/3 * ((z_vals_shifted - z_vals_shifted) * (weights ** 2)).sum()
+
+        return {
+            'depth': depth,
         }
 
     def run_cuda(self, rays_o, rays_d, dt_gamma=0, bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, **kwargs):

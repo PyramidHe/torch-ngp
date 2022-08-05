@@ -457,7 +457,7 @@ class Trainer(object):
         feat_loss = self.criterion(out_features, features).mean(-1).mean()
         return feat_loss
 
-    def train_step(self, data):
+    def train_step(self, data, verbose=False):
 
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
@@ -487,14 +487,20 @@ class Trainer(object):
         # patch
         rays_patch_o = data['rays_patch_o']
         rays_patch_d = data['rays_patch_d']
+
         pe = min(self.epoch//20, 7)
+        pe = 5
         images_patch = data['images_patch']
         if pe>0:
-            rays_patch_o = rays_patch_o[:, :, pe:-pe, pe:-pe]
-            rays_patch_d = rays_patch_d[:, :, pe:-pe, pe:-pe]
-            images_patch = data['images_patch'][:,:, pe:-pe, pe:-pe]
-        outputs_patch = self.model.run_patch(rays_patch_o, rays_patch_d)
+            rays_patch_o_ = rays_patch_o[:, :, pe:-pe, pe:-pe]
+            rays_patch_d_ = rays_patch_d[:, :, pe:-pe, pe:-pe]
+            images_patch_ = data['images_patch'][:,:, pe:-pe, pe:-pe]
+        outputs_patch = self.model.run_patch(rays_patch_o_, rays_patch_d_, epoch=self.epoch)
         full_patch_size = rays_patch_o.shape[-2]
+        pe = 2
+        rays_patch_o = rays_patch_o[:, :, pe:-pe, pe:-pe]
+        rays_patch_d = rays_patch_d[:, :, pe:-pe, pe:-pe]
+        images_patch = data['images_patch'][:, :, pe:-pe, pe:-pe]
 
         pred_rgb_patch = outputs_patch['image']
         gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
@@ -503,18 +509,21 @@ class Trainer(object):
 
           # [B, N, 3] --> [B, N]
         if True:
-            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:10]
+            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:40]
             rays_patch_o = torch.index_select(rays_patch_o, dim=1, index=index)
             rays_patch_d = torch.index_select(rays_patch_d, dim=1, index=index)
             pshape = rays_patch_o.shape
             rays_patch_o = rays_patch_o.contiguous().view(pshape[0], pshape[1]*pshape[2]*pshape[3], -1)
             rays_patch_d = rays_patch_d.contiguous().view(pshape[0], pshape[1]*pshape[2]*pshape[3], -1)
-            outputs_patch = self.model.render(rays_patch_o, rays_patch_d,
-                                              staged=False, bg_color=bg_color, perturb=True, force_all_rays=False,
+            outputs_patch = self.model.run_depth(rays_patch_o, rays_patch_d,
+                                              staged=False, epoch=self.epoch, bg_color=bg_color, perturb=True, force_all_rays=False,
                                               **vars(self.opt))
             depths_patch = outputs_patch['depth'].view(*pshape[:4])
             images_patch = torch.index_select(images_patch, dim=1, index=index)
-            loss = loss + smooth_depth_loss(depths_patch, images_patch) #+ 0.02*entropy_loss
+            #smooth_lambda = max(5*math.exp(-self.epoch/25), 1)
+            smooth_lambda = self.epoch/25
+
+            loss = loss +  smooth_depth_loss(depths_patch, images_patch) #+ 0.02*entropy_loss
 
 
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]
@@ -851,7 +860,7 @@ class Trainer(object):
 
             with torch.cuda.amp.autocast(enabled=self.fp16):
                 preds, truths, loss = self.train_step(data)
-         
+
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
