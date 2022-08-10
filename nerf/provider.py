@@ -411,6 +411,12 @@ class NeRFDataset:
                 results['rays_patch_o'] = rays_on_patch['rays_patch_o']
                 results['rays_patch_d'] = rays_on_patch['rays_patch_d']
 
+                o_index = [(i + 1) % len(self.poses) for i in index]
+                o_poses = self.poses[o_index].to(self.device)
+                results['o_poses'] = o_poses
+                results['intrinsics'] = self.intrinsics
+                results['o_images'] = self.images[o_index].to(self.device)
+
             results['images'] = images
 
 

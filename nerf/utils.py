@@ -98,6 +98,106 @@ def get_patchrays(poses, intrinsics, H, W, N, PSH=4, PSW=4):
     return results
 
 @torch.cuda.amp.autocast(enabled=False)
+def get_rays_c(poses, intrinsics, H, W, N=-1, error_map=None):
+    ''' get rays
+    Args:
+        poses: [B, 4, 4], cam2world
+        intrinsics: [4]
+        H, W, N: int
+        error_map: [B, 128 * 128], sample probability based on training error
+    Returns:
+        rays_o, rays_d: [B, N, 3]
+        inds: [B, N]
+    '''
+
+    device = poses.device
+    B = poses.shape[0]
+    fx, fy, cx, cy = intrinsics
+
+    i, j = custom_meshgrid(torch.linspace(0, W-1, W, device=device), torch.linspace(0, H-1, H, device=device))
+    i = i.t().reshape([1, H*W]).expand([B, H*W])
+    j = j.t().reshape([1, H*W]).expand([B, H*W])
+    ic = i.t().reshape([1, H * W]).expand([B, H * W]) + 0.5
+    jc = j.t().reshape([1, H * W]).expand([B, H * W]) + 0.5
+    ip = i.t().reshape([1, H * W]).expand([B, H * W]) + 1.0
+    jp = j.t().reshape([1, H * W]).expand([B, H * W]) + 1.0
+
+    results = {}
+
+    if N > 0:
+        N = min(N, H*W)
+
+        if error_map is None:
+            inds = torch.randint(0, H*W, size=[N], device=device) # may duplicate
+            inds = inds.expand([B, N])
+        else:
+
+            # weighted sample on a low-reso grid
+            inds_coarse = torch.multinomial(error_map.to(device), N, replacement=False) # [B, N], but in [0, 128*128)
+
+            # map to the original resolution with random perturb.
+            inds_x, inds_y = inds_coarse // 128, inds_coarse % 128 # `//` will throw a warning in torch 1.10... anyway.
+            sx, sy = H / 128, W / 128
+            inds_x = (inds_x * sx + torch.rand(B, N, device=device) * sx).long().clamp(max=H - 1)
+            inds_y = (inds_y * sy + torch.rand(B, N, device=device) * sy).long().clamp(max=W - 1)
+            inds = inds_x * W + inds_y
+
+            results['inds_coarse'] = inds_coarse # need this when updating error_map
+
+        i = torch.gather(i, -1, inds)
+        j = torch.gather(j, -1, inds)
+
+        ic = torch.gather(ic, -1, inds)
+        jc = torch.gather(jc, -1, inds)
+
+        ip = torch.gather(ip, -1, inds)
+        jp = torch.gather(jp, -1, inds)
+
+        results['inds'] = inds
+
+    else:
+        inds = torch.arange(H*W, device=device).expand([B, H*W])
+
+    zs = torch.ones_like(i)
+    xs = (i - cx) / fx * zs
+    ys = (j - cy) / fy * zs
+
+    xsc = (ic - cx) / fx * zs
+    ysc = (jc - cy) / fy * zs
+
+    xsp = (ip - cx) / fx * zs
+    ysp = (jp - cy) / fy * zs
+
+    directions_ul = torch.stack((xs, ys, zs), dim=-1)
+    directions_uc = torch.stack((xsc, ys, zs), dim=-1)
+    directions_ur = torch.stack((xsp, ys, zs), dim=-1)
+
+    directions_cl = torch.stack((xs, ysc, zs), dim=-1)
+    directions_cc = torch.stack((xsc, ysc, zs), dim=-1)
+    directions_cr = torch.stack((xsp, ysc, zs), dim=-1)
+
+    directions_dl = torch.stack((xs, ysp, zs), dim=-1)
+    directions_dc = torch.stack((xsc, ysp, zs), dim=-1)
+    directions_dr = torch.stack((xsp, ysp, zs), dim=-1)
+
+    directions_l = torch.stack((directions_ul, directions_cl, directions_dl), dim=-2)
+    directions_c = torch.stack((directions_uc, directions_cc, directions_dc), dim=-2)
+    directions_r = torch.stack((directions_ur, directions_cr, directions_dr), dim=-2)
+
+    directions = torch.stack((directions_l, directions_c, directions_r), dim=-2)
+    directions = directions / torch.norm(directions, dim=-1, keepdim=True)
+
+    rays_d = directions @ poses[:, :3, :3].transpose(-1, -2) # (B, N, 3)
+    rays_o = poses[..., :3, 3] # [B, 3]
+    rays_o = rays_o[..., None, :].expand_as(rays_d) # [B, N, 3]
+
+    results['rays_o'] = rays_o
+    results['rays_d'] = rays_d
+
+    return results
+
+
+@torch.cuda.amp.autocast(enabled=False)
 def get_all_rays(poses, intrinsics, H, W):
     ''' get rays
     Args:
@@ -508,27 +608,32 @@ class Trainer(object):
         full_patch_size = rays_patch_o.shape[-2]
         images_patch = data['images_patch']
         pred_rgb_patch = outputs_patch['image']
-        entropy_loss = outputs_patch['entropy_loss']
+
+        # 'image': results['image'],
+        # 'gt_depths': new_depths,
+        # 'pred_depths': pred_depths,
+        #cs = self.model.run_cs(rays_patch_o, rays_patch_d, num_steps=128,upsample_steps=128, only_depth=False)
+        #loss_cs = self.criterion(cs['gt_depths'], cs['pred_depths']).mean(-1).mean()
         gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
         loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
 
           # [B, N, 3] --> [B, N]
         if True:
-            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:50]
+
+            index = torch.randperm(rays_patch_o.shape[1], device=self.device)[:40]
             rays_patch_o = torch.index_select(rays_patch_o, dim=1, index=index)
             rays_patch_d = torch.index_select(rays_patch_d, dim=1, index=index)
+            pshape = rays_patch_o.shape
+            rays_patch_o = rays_patch_o.contiguous().view(pshape[0], pshape[1] * pshape[2] * pshape[3], -1)
+            rays_patch_d = rays_patch_d.contiguous().view(pshape[0], pshape[1] * pshape[2] * pshape[3], -1)
+            outputs_patch = self.model.run(rays_patch_o, rays_patch_d,
+                                                 staged=False, epoch=self.epoch, bg_color=bg_color, perturb=True,
+                                                 force_all_rays=False, only_depth=True,
+                                                 **vars(self.opt))
+            depths_patch = outputs_patch['depth'].view(*pshape[:4])
             images_patch = torch.index_select(images_patch, dim=1, index=index)
-            depths_patch = torch.zeros((rays_patch_o.shape[0], rays_patch_o.shape[1], full_patch_size, full_patch_size),
-                                       device=self.device)
 
-            for y in range(full_patch_size):
-                for x in range(full_patch_size):
-                    outputs_patch = self.model.render(rays_patch_o[:, :, y, x, :], rays_patch_d[:, :, y, x, :],
-                                      staged=False, bg_color=bg_color, perturb=True, force_all_rays=False,
-                                      **vars(self.opt))
-                    depths_patch[:, :, y, x] = outputs_patch['depth']
-                    #loss += self.criterion(outputs_patch['image'], images_patch[:, :, y, x, :]).mean(-1).mean()
             loss = loss + smooth_depth_loss(depths_patch, images_patch) #+ 0.02*entropy_loss
 
 
