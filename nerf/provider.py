@@ -11,7 +11,7 @@ import trimesh
 import open3d as o3d
 import torch
 from torch.utils.data import DataLoader
-from .utils import get_rays, get_all_rays, get_patchrays, ImgFE, srgb_to_linear, torch_vis_2d
+from .utils import get_rays, get_rays_c, get_all_rays, get_patchrays, ImgFE, srgb_to_linear, torch_vis_2d
 
 
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
@@ -389,12 +389,15 @@ class NeRFDataset:
         error_map = None if self.error_map is None else self.error_map[index]
 
         rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
+        rays_c = get_rays_c(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
 
         results = {
             'H': self.H,
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
+            'rays_co': rays_c['rays_o'],
+            'rays_cd': rays_c['rays_d'],
         }
 
         if self.images is not None:
@@ -403,6 +406,7 @@ class NeRFDataset:
             if self.training:
                 C = imgs.shape[-1]
                 images = torch.gather(imgs.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
+                images_c = torch.gather(imgs.view(B, -1, C), 1, torch.stack(C * [rays_c['inds']], -1))
                 # patches
                 rays_on_patch = get_patchrays(poses, self.intrinsics, self.H, self.W, self.num_rays)
                 psh, psw = rays_on_patch['patch_size']
@@ -411,13 +415,8 @@ class NeRFDataset:
                 results['rays_patch_o'] = rays_on_patch['rays_patch_o']
                 results['rays_patch_d'] = rays_on_patch['rays_patch_d']
 
-                o_index = [(i + 1) % len(self.poses) for i in index]
-                o_poses = self.poses[o_index].to(self.device)
-                results['o_poses'] = o_poses
-                results['intrinsics'] = self.intrinsics
-                results['o_images'] = self.images[o_index].to(self.device)
-
             results['images'] = images
+            results['images_c'] = images_c
 
 
         # need inds to update error_map

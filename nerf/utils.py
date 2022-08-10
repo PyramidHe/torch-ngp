@@ -193,7 +193,7 @@ def get_rays_c(poses, intrinsics, H, W, N=-1, error_map=None):
 
     results['rays_o'] = rays_o
     results['rays_d'] = rays_d
-
+    results['inds'] = inds
     return results
 
 
@@ -602,12 +602,21 @@ class Trainer(object):
         #outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=False, **vars(self.opt))
         #pred_rgb = outputs['image']
         # patch
+
         rays_patch_o = data['rays_patch_o']
         rays_patch_d = data['rays_patch_d']
-        outputs_patch = self.model.run_patch(rays_patch_o, rays_patch_d)
-        full_patch_size = rays_patch_o.shape[-2]
+        steps = [32, 64, 128, 192, 224]
+        index_steps = max(self.epoch//50, len(steps)-1)
+        num_steps = steps[index_steps]
+        upsample_steps = steps[len(steps)-1-index_steps]
+        outputs_patch = self.model.run_patch(rays_patch_o, rays_patch_d, num_steps=num_steps, upsample_steps=upsample_steps, step=self.epoch)
         images_patch = data['images_patch']
         pred_rgb_patch = outputs_patch['image']
+
+        rays_co = data['rays_co']
+        rays_cd = data['rays_cd']
+        outputs_patch_c = self.model.run_patch(rays_co, rays_cd, num_steps=num_steps, upsample_steps=upsample_steps, step=self.epoch)
+        loss_c = self.criterion(outputs_patch_c['image'], data['images_c']).mean(-1).mean()
 
         # 'image': results['image'],
         # 'gt_depths': new_depths,
@@ -615,7 +624,7 @@ class Trainer(object):
         #cs = self.model.run_cs(rays_patch_o, rays_patch_d, num_steps=128,upsample_steps=128, only_depth=False)
         #loss_cs = self.criterion(cs['gt_depths'], cs['pred_depths']).mean(-1).mean()
         gt_rgb_patch = torch.mean(images_patch, dim=(-2, -3))
-        loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean()
+        loss = self.criterion(pred_rgb_patch, gt_rgb_patch).mean(-1).mean() + loss_c
         #loss = self.criterion(pred_rgb, gt_rgb).mean(-1).mean()
 
           # [B, N, 3] --> [B, N]
