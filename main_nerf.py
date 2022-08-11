@@ -140,8 +140,9 @@ if __name__ == '__main__':
             valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
+            #trainer.feature_train(feature_train_loader, 50)
             trainer.train(train_loader, valid_loader, max_epoch)
-            #trainer.feature_train(feature_train_loader, max_epoch)
+
 
             # also test
             test_loader = NeRFDataset(opt, device=device, type='test').dataloader()

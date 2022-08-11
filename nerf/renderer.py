@@ -124,7 +124,7 @@ class NeRFRenderer(nn.Module):
     def set_feature_extractor(self, device):
         self.feature_extractor = ImgFE(device)
 
-    def run_for_features(self, all_rays_o, all_rays_d, height, width, num_steps=128, upsample_steps=128, bg_color=None):
+    def run_for_features(self, all_rays_o, all_rays_d, height, width, step=0, num_steps=128, upsample_steps=128, bg_color=None):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
         # return: image: [B, N, 3], depth: [B, N]
@@ -144,7 +144,7 @@ class NeRFRenderer(nn.Module):
         patch_d = patch_d.permute(0, 1, 2, 4, 5, 3).contiguous()
         prefix = patch_d.shape[:3]
         patch_d = patch_d.view(patch_d.shape[0], -1, patch_d.shape[3], patch_d.shape[4], patch_d.shape[5])
-        result = self.run_patch(patch_o, patch_d, num_steps, upsample_steps, bg_color)
+        result = self.run_patch(patch_o, patch_d, step=step, num_steps=num_steps, upsample_steps=upsample_steps, bg_color=bg_color)
         image = result['image']
         image = image.view(*prefix, 3).permute(0, 3, 1, 2)
         image = torch.nn.functional.interpolate(image, (height, width))

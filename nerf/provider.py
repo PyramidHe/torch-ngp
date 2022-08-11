@@ -403,6 +403,7 @@ class NeRFDataset:
         if self.images is not None:
             imgs = self.images[index].to(self.device) # [B, H, W, 3/4]
             images = imgs
+            images_c = imgs
             if self.training:
                 C = imgs.shape[-1]
                 images = torch.gather(imgs.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]

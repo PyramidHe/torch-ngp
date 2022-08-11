@@ -553,7 +553,11 @@ class Trainer(object):
         all_rays = data['all_rays']
         fe_input_height = data['HF']
         fe_input_width = data['WF']
-        out_features = self.model.run_for_features(all_rays['rays_o'], all_rays['rays_d'], fe_input_height, fe_input_width)
+        steps = [32, 64, 128, 192, 224]
+        index_steps = max(self.epoch // 50, len(steps) - 1)
+        num_steps = steps[index_steps]
+        upsample_steps = steps[len(steps) - 1 - index_steps]
+        out_features = self.model.run_for_features(all_rays['rays_o'], all_rays['rays_d'] ,fe_input_height, fe_input_width, upsample_steps=upsample_steps, num_steps=num_steps, step=self.epoch)
         feat_loss = self.criterion(out_features, features).mean(-1).mean()
         return feat_loss
 
